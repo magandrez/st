@@ -210,6 +210,7 @@ static void tdefutf8(char);
 static int32_t tdefcolor(const int *, int *, int);
 static void tdeftran(char);
 static void tstrsequence(uchar);
+static const char *findlastany(const char *, const char **, size_t);
 
 static void drawregion(int, int, int, int);
 
@@ -2545,64 +2546,79 @@ void redraw(void) {
   draw();
 }
 
-/* select and copy the previous url on screen (do nothing if there's no url).
- * known bug: doesn't handle urls that span multiple lines (wontfix)
- * known bug: only finds first url on line (mightfix)
- */
-void
-copyurl(const Arg *arg) {
-	/* () and [] can appear in urls, but excluding them here will reduce false
-	 * positives when figuring out where a given url ends.
-	 */
-	static char URLCHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-		"abcdefghijklmnopqrstuvwxyz"
-		"0123456789-._~:/?#@!$&'*+,;=%";
+const char *findlastany(const char *str, const char **find, size_t len) {
+  const char *found = NULL;
+  int i = 0;
 
-	int i, row, startrow;
-	char *linestr = calloc(sizeof(char), term.col+1); /* assume ascii */
-	char *c, *match = NULL;
+  for (found = str + strlen(str) - 1; found >= str; --found) {
+    for (i = 0; i < len; i++) {
+      if (strncmp(found, find[i], strlen(find[i])) == 0) {
+        return found;
+      }
+    }
+  }
 
-	row = (sel.ob.x >= 0 && sel.nb.y > 0) ? sel.nb.y-1 : term.bot;
-	LIMIT(row, term.top, term.bot);
-	startrow = row;
+  return NULL;
+}
 
-	/* find the start of the last url before selection */
-	do {
-		for (i = 0; i < term.col; ++i) {
-			if (term.line[row][i].u > 127) /* assume ascii */
-				continue;
-			linestr[i] = term.line[row][i].u;
-		}
-		linestr[term.col] = '\0';
-		if ((match = strstr(linestr, "http://"))
-				|| (match = strstr(linestr, "https://")))
-			break;
-		if (--row < term.top)
-			row = term.bot;
-	} while (row != startrow);
+/*
+** Select and copy the previous url on screen (do nothing if there's no url).
+**
+** FIXME: doesn't handle urls that span multiple lines; will need to add support
+**        for multiline "getsel()" first
+*/
+void copyurl(const Arg *arg) {
+  /* () and [] can appear in urls, but excluding them here will reduce false
+   * positives when figuring out where a given url ends.
+   */
+  static const char URLCHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                 "abcdefghijklmnopqrstuvwxyz"
+                                 "0123456789-._~:/?#@!$&'*+,;=%";
 
-	if (match) {
-		/* must happen before trim */
-		selclear();
-		sel.ob.x = strlen(linestr) - strlen(match);
+  static const char *URLSTRINGS[] = {"http://", "https://"};
 
-		/* trim the rest of the line from the url match */
-		for (c = match; *c != '\0'; ++c)
-			if (!strchr(URLCHARS, *c)) {
-				*c = '\0';
-				break;
-			}
+  int row = 0,    /* row of current URL */
+      col = 0,    /* column of current URL start */
+      colend = 0, /* column of last occurrence */
+      passes = 0; /* how many rows have been scanned */
 
-		/* select and copy */
-		sel.mode = 1;
-		sel.type = SEL_REGULAR;
-		sel.oe.x = sel.ob.x + strlen(match)-1;
-		sel.ob.y = sel.oe.y = row;
-		selnormalize();
-		tsetdirt(sel.nb.y, sel.ne.y);
-		xsetsel(getsel());
-		xclipcopy();
-	}
+  char linestr[term.col + 1];
+  const char *c = NULL, *match = NULL;
 
-	free(linestr);
+  row = (sel.ob.x >= 0 && sel.nb.y > 0) ? sel.nb.y : term.bot;
+  LIMIT(row, term.top, term.bot);
+
+  colend = (sel.ob.x >= 0 && sel.nb.y > 0) ? sel.nb.x : term.col;
+  LIMIT(colend, 0, term.col);
+
+  /*
+  ** Scan from (term.row - 1,term.col - 1) to (0,0) and find
+  ** next occurrance of a URL
+  */
+  for (passes = 0; passes < term.row; passes++) {
+    /* Read in each column of every row until
+    ** we hit previous occurrence of URL
+    */
+    for (col = 0; col < colend; ++col)
+      linestr[col] = term.line[row][col].u < 128 ? term.line[row][col].u : ' ';
+    linestr[col] = '\0';
+
+    if ((match = findlastany(linestr, URLSTRINGS,
+                             sizeof(URLSTRINGS) / sizeof(URLSTRINGS[0]))))
+      break;
+
+    if (--row < 0)
+      row = term.row - 1;
+
+    colend = term.col;
+  };
+
+  if (match) {
+    size_t l = strspn(match, URLCHARS);
+    selstart(match - linestr, row, 0);
+    selextend(match - linestr + l - 1, row, SEL_REGULAR, 0);
+    selextend(match - linestr + l - 1, row, SEL_REGULAR, 1);
+    xsetsel(getsel());
+    xclipcopy();
+  }
 }
